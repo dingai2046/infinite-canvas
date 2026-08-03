@@ -184,10 +184,110 @@ function isAiConfigReady(config: AiConfig, model: string) {
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
 }
 
+/**
+ * 宿主注入的渠道。画布被嵌进别的站点时（例如挂在自家域名下当创作台），
+ * 宿主可以在画布脚本之前写一个全局对象，把接口地址 / 令牌 / 模型 / 调用脚本一次下发，
+ * 用户打开就能用，不必手动配渠道：
+ *
+ *   window.__CANVAS_HOST_CHANNEL__ = {
+ *     id: "koko", name: "Koko", baseUrl: "/api/canvas/v1", apiKey: "…",
+ *     models: [{ name, capability, script }]
+ *   }
+ *
+ * 每次 hydrate 都以宿主下发的为准覆盖同 id 那一条（令牌会轮换），用户自己加的渠道原样保留。
+ * 没有这个全局对象时（独立部署）行为与改动前完全一致。
+ */
+type HostChannelInput = {
+    id?: string;
+    name?: string;
+    baseUrl?: string;
+    apiKey?: string;
+    models?: Array<string | ChannelModel>;
+};
+
+function readHostChannel(): ModelChannel | null {
+    if (typeof window === "undefined") return null;
+    const raw = (window as Window & { __CANVAS_HOST_CHANNEL__?: HostChannelInput }).__CANVAS_HOST_CHANNEL__;
+    if (!raw?.baseUrl?.trim() || !raw?.apiKey?.trim()) return null;
+    return createModelChannel({
+        id: raw.id?.trim() || "host",
+        name: raw.name?.trim() || "宿主渠道",
+        baseUrl: raw.baseUrl,
+        apiKey: raw.apiKey,
+        apiFormat: "openai",
+        models: raw.models,
+    });
+}
+
+function withHostChannel(channels: ModelChannel[]): ModelChannel[] {
+    const host = readHostChannel();
+    if (!host) return channels;
+    // 排在最前：新用户的默认模型会落在宿主渠道上，省掉一次手动选择
+    return [host, ...channels.filter((channel) => channel.id !== host.id)];
+}
+
+/** 该能力下第一个可用模型；持久化的选择失效（换渠道/模型下架）时用它兜底，避免选择器空着。 */
+function firstModelOf(channels: ModelChannel[], capability: ModelCapability): string {
+    for (const channel of channels) {
+        const model = channel.models.find((item) => item.capability === capability);
+        if (model) return encodeChannelModel(channel.id, model.name);
+    }
+    return "";
+}
+
+/**
+ * 选默认模型：只有当已有选择落在**填了 key 的**渠道上才保留它。
+ * 否则退到第一个可用模型 —— 宿主渠道排在最前，于是宿主注入后默认就是能直接跑的那个，
+ * 而不是内置那条没填 key 的示例渠道（选中它点生成必然报错，对新用户是纯坑）。
+ */
+function pickDefaultModel(value: string | undefined, channels: ModelChannel[], capability: ModelCapability): string {
+    const resolved = normalizeModelOptionValue(value, channels);
+    if (resolved) {
+        const decoded = decodeChannelModel(resolved);
+        const channel = decoded && channels.find((item) => item.id === decoded.channelId);
+        if (channel?.apiKey.trim()) return resolved;
+    }
+    return firstModelOf(channels, capability) || resolved;
+}
+
+/**
+ * 把一份（可能残缺的）配置补齐成可用的 AiConfig：并入宿主渠道、归一化渠道、重算模型选项。
+ * 被 persist 的 merge 与 store 初始值共用 —— 因为 zustand 的 merge 只在 storage 里已有数据时才跑，
+ * 只写在 merge 里的话，第一次打开画布的新用户拿不到宿主渠道。
+ */
+function finalizeConfig(raw: Partial<AiConfig>): AiConfig {
+    const config = { ...defaultConfig, ...raw };
+    if (!Array.isArray(raw.channels)) config.channels = [];
+    const channels = withHostChannel(normalizeChannels(config));
+    const models = modelOptionsFromChannels(channels);
+    return {
+        ...config,
+        channelMode: "local",
+        apiFormat: normalizeApiFormat(config.apiFormat),
+        channels,
+        models,
+        imageModel: pickDefaultModel(config.imageModel || config.model, channels, "image"),
+        videoModel: pickDefaultModel(config.videoModel, channels, "video"),
+        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
+        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
+        audioVoice: config.audioVoice || defaultConfig.audioVoice,
+        audioFormat: config.audioFormat || defaultConfig.audioFormat,
+        audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
+        audioInstructions: config.audioInstructions || "",
+        reasoningEffort: config.reasoningEffort || "auto",
+        videoSeconds: config.videoSeconds || "6",
+        vquality: config.vquality || "720",
+        videoGenerateAudio: config.videoGenerateAudio || "true",
+        videoWatermark: config.videoWatermark || "false",
+        canvasImageCount: config.canvasImageCount || "3",
+    };
+}
+
 export const useConfigStore = create<ConfigStore>()(
     persist(
         (set, get) => ({
-            config: defaultConfig,
+            // 有宿主渠道时才走 finalize：独立部署下初始值与改动前逐字节一致，零行为变化
+            config: readHostChannel() ? finalizeConfig(defaultConfig) : defaultConfig,
             webdav: defaultWebdavSyncConfig,
             isConfigOpen: false,
             configTab: "channels",
@@ -218,34 +318,10 @@ export const useConfigStore = create<ConfigStore>()(
                 const persistedState = (persisted || {}) as Partial<ConfigStore>;
                 const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
                 const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
-                const config = { ...defaultConfig, ...persistedConfig };
-                if (!Array.isArray(persistedConfig.channels)) config.channels = [];
-                const channels = normalizeChannels(config);
-                const models = modelOptionsFromChannels(channels);
                 return {
                     ...current,
                     webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
-                    config: {
-                        ...config,
-                        channelMode: "local",
-                        apiFormat: normalizeApiFormat(config.apiFormat),
-                        channels,
-                        models,
-                        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
-                        videoModel: normalizeModelOptionValue(config.videoModel, channels),
-                        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
-                        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
-                        audioVoice: config.audioVoice || defaultConfig.audioVoice,
-                        audioFormat: config.audioFormat || defaultConfig.audioFormat,
-                        audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
-                        audioInstructions: config.audioInstructions || "",
-                        reasoningEffort: config.reasoningEffort || "auto",
-                        videoSeconds: config.videoSeconds || "6",
-                        vquality: config.vquality || "720",
-                        videoGenerateAudio: config.videoGenerateAudio || "true",
-                        videoWatermark: config.videoWatermark || "false",
-                        canvasImageCount: config.canvasImageCount || "3",
-                    },
+                    config: finalizeConfig(persistedConfig),
                 };
             },
         },
