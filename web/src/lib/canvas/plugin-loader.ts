@@ -119,7 +119,8 @@ export async function ensurePluginsLoaded() {
 async function loadLocalPlugins() {
     let urls: unknown;
     try {
-        const response = await fetch("/plugins/index.json");
+        // 走 BASE_URL 而非写死根路径，挂到子路径（/canvas/）时清单才找得到
+        const response = await fetch(`${import.meta.env.BASE_URL}plugins/index.json`);
         if (!response.ok) return;
         urls = await response.json();
     } catch {
