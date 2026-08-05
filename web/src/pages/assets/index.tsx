@@ -9,6 +9,8 @@ import { uploadImage } from "@/services/image-storage";
 import { cn } from "@/lib/utils";
 import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
 import { exportAssets, readAssetPackage } from "./asset-transfer";
+import HostImportModal from "./host-import-modal";
+import { hostAssetsSource } from "@/services/host-assets";
 
 type AssetFormValues = {
     kind: AssetKind;
@@ -40,6 +42,8 @@ export default function AssetsPage() {
     const addAsset = useAssetStore((state) => state.addAsset);
     const updateAsset = useAssetStore((state) => state.updateAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
+    const [hostImportOpen, setHostImportOpen] = useState(false);
+    const hostAssets = hostAssetsSource();
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
     const [page, setPage] = useState(1);
@@ -248,6 +252,15 @@ export default function AssetsPage() {
                                 >
                                     导入资产
                                 </button>
+                                {hostAssets && (
+                                    <button
+                                        type="button"
+                                        className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline dark:text-stone-300"
+                                        onClick={() => setHostImportOpen(true)}
+                                    >
+                                        从{hostAssets.label}导入
+                                    </button>
+                                )}
                                 <button
                                     type="button"
                                     className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline dark:text-stone-300"
@@ -398,6 +411,8 @@ export default function AssetsPage() {
             <Modal title="删除资产" open={Boolean(deletingAsset)} onCancel={() => setDeletingAsset(null)} onOk={confirmDelete} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
                 确定删除「{deletingAsset?.title}」吗？删除后会从我的资产中移除。
             </Modal>
+
+            {hostAssets && <HostImportModal open={hostImportOpen} onClose={() => setHostImportOpen(false)} />}
         </div>
     );
 }

@@ -197,17 +197,24 @@ function isAiConfigReady(config: AiConfig, model: string) {
  * 每次 hydrate 都以宿主下发的为准覆盖同 id 那一条（令牌会轮换），用户自己加的渠道原样保留。
  * 没有这个全局对象时（独立部署）行为与改动前完全一致。
  */
-type HostChannelInput = {
+export type HostChannelInput = {
     id?: string;
     name?: string;
     baseUrl?: string;
     apiKey?: string;
     models?: Array<string | ChannelModel>;
+    /** 宿主资产库：声明了就在素材页显示「从宿主导入」，鉴权复用同一把 apiKey */
+    assets?: { url?: string; label?: string };
 };
 
-function readHostChannel(): ModelChannel | null {
+/** 宿主注入的原始对象；渠道之外的能力（如资产库）也从这里读 */
+export function readHostChannelConfig(): HostChannelInput | null {
     if (typeof window === "undefined") return null;
-    const raw = (window as Window & { __CANVAS_HOST_CHANNEL__?: HostChannelInput }).__CANVAS_HOST_CHANNEL__;
+    return (window as Window & { __CANVAS_HOST_CHANNEL__?: HostChannelInput }).__CANVAS_HOST_CHANNEL__ || null;
+}
+
+function readHostChannel(): ModelChannel | null {
+    const raw = readHostChannelConfig();
     if (!raw?.baseUrl?.trim() || !raw?.apiKey?.trim()) return null;
     return createModelChannel({
         id: raw.id?.trim() || "host",
@@ -215,7 +222,9 @@ function readHostChannel(): ModelChannel | null {
         baseUrl: raw.baseUrl,
         apiKey: raw.apiKey,
         apiFormat: "openai",
-        models: raw.models,
+        // createModelChannel 的入参类型是 Partial<ModelChannel>（models 必须已是 ChannelModel[]），
+        // 宿主下发的可以是裸模型名，先归一化再传
+        models: normalizeChannelModels(raw.models),
     });
 }
 
